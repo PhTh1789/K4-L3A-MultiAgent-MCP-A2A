@@ -3,18 +3,20 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ..mcp_gateway import EvidenceGateway
+from ..mcp_gateway import EvidenceGateway, call_with_retry
 from ..trace import TraceWriter
 
-_ORDER_ID_KEYS = frozenset({"order_id", "order_ids"})
+_ORDER_ID_KEYS = frozenset({"claimed_order_id", "order_id", "order_ids"})
 _PAYMENT_REFERENCE_KEYS = frozenset(
     {
         "payment_id",
         "payment_ids",
+        "payment_ref",
         "payment_reference",
         "payment_references",
         "transaction_id",
         "transaction_ids",
+        "transaction_ref",
         "transaction_reference",
         "transaction_references",
     }
@@ -28,7 +30,7 @@ _DUPLICATE_KEYS = frozenset(
 )
 _POLICY_VERSION_KEYS = frozenset({"policy_version", "policy_versions"})
 _CLAIMS_KEYS = frozenset({"claims"})
-_CLAIM_KIND_KEYS = ("claim_type", "issue", "reason_code", "type")
+_CLAIM_KIND_KEYS = ("claim_type", "issue", "reason_code", "topic", "type")
 _PAYMENT_CLAIM_KINDS = frozenset(
     {
         "duplicate_charge",
@@ -41,7 +43,6 @@ _PAYMENT_CLAIM_KINDS = frozenset(
 
 
 def _iter_keyed_values(value: Any, wanted_keys: frozenset[str]) -> Iterable[Any]:
-    """Yield values whose field name is authoritative enough for extraction."""
     if isinstance(value, Mapping):
         for key, child in value.items():
             if key in wanted_keys:
@@ -78,9 +79,9 @@ def _contains_explicit_duplicate(value: Any) -> bool:
             "null",
         }:
             return True
-
-    status_tokens = (status.lower() for status in _extract_strings(value, _STATUS_KEYS))
-    return any("duplicate" in status for status in status_tokens)
+    return any(
+        "duplicate" in status.lower() for status in _extract_strings(value, _STATUS_KEYS)
+    )
 
 
 def _record_count(data: Any, collection_keys: tuple[str, ...]) -> int:
@@ -135,7 +136,6 @@ def _payment_claim_assessments(
         kind = _claim_kind(claim)
         if kind not in _PAYMENT_CLAIM_KINDS:
             continue
-
         supported = issue_signals.get(kind, False)
         relevant_refs = (
             refund_evidence_refs
@@ -154,80 +154,80 @@ def _payment_claim_assessments(
 
 
 class PaymentPolicyAgent:
-    """Collect authoritative payment and refund evidence for the policy stage."""
+    """Collect payment, refund and policy evidence for one scoped case."""
 
     def __init__(self, gateway: EvidenceGateway, trace: TraceWriter) -> None:
         self.gateway = gateway
         self.trace = trace
 
     async def run(self, case_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        """Investigate payments for every structured order ID in this case.
-
-        Policy decisions intentionally remain a later stage. This method never parses
-        free-form customer text as ground truth and never manufactures evidence refs.
-        """
         order_ids = _extract_strings(context, _ORDER_ID_KEYS)
-        evidence_refs: list[str] = []
-        payment_evidence_refs: list[str] = []
-        refund_evidence_refs: list[str] = []
-        payment_references: list[str] = []
-        orders: dict[str, dict[str, Any]] = {}
+        order_id = order_ids[0] if order_ids else None
+        policy_versions = _extract_strings(context, _POLICY_VERSION_KEYS)
+        if len(policy_versions) > 1:
+            raise ValueError(f"case contains multiple policy versions: {policy_versions}")
 
-        for order_id in order_ids:
-            order_evidence: dict[str, Any] = {}
-            for tool_name, result_key, expected_domain in (
-                ("get_order_payments", "order_payments", "payment"),
-                ("get_payment_timeline", "payment_timeline", "payment"),
-                ("get_refund_timeline", "refund_timeline", "refund"),
-            ):
-                evidence = await self.gateway.call(
+        requests: list[tuple[str, dict[str, str], str]] = []
+        if order_id is not None:
+            requests.extend(
+                (
+                    ("get_order_payments", {"order_id": order_id}, "payment"),
+                    ("get_payment_timeline", {"order_id": order_id}, "payment"),
+                    ("get_refund_timeline", {"order_id": order_id}, "refund"),
+                )
+            )
+        if policy_versions:
+            requests.append(
+                ("get_policy", {"policy_version": policy_versions[0]}, "policy")
+            )
+
+        evidence: dict[str, dict[str, Any]] = {}
+        errors: list[str] = []
+        for tool_name, arguments, expected_domain in requests:
+            try:
+                result = await call_with_retry(
+                    self.gateway,
                     tool_name,
                     case_id=case_id,
-                    order_id=order_id,
+                    **arguments,
                 )
-                if evidence["domain"] != expected_domain:
+                if result["domain"] != expected_domain:
                     raise ValueError(
-                        f"{tool_name} returned domain {evidence['domain']!r}; "
+                        f"{tool_name} returned domain {result['domain']!r}; "
                         f"expected {expected_domain!r}"
                     )
+            except Exception as error:
+                errors.append(f"{tool_name}: {type(error).__name__}")
+                continue
 
-                evidence_ref = evidence["evidence_ref"]
-                evidence_refs.append(evidence_ref)
-                if expected_domain == "refund":
-                    refund_evidence_refs.append(evidence_ref)
-                else:
-                    payment_evidence_refs.append(evidence_ref)
-                payment_references.extend(
-                    _extract_strings(evidence["data"], _PAYMENT_REFERENCE_KEYS)
-                )
-                order_evidence[result_key] = {
-                    "evidence_ref": evidence_ref,
-                    "data": evidence["data"],
-                    "warnings": evidence.get("warnings", []),
-                }
-                self.trace.emit(
-                    case_id=case_id,
-                    event_type="tool_result_consumed",
-                    actor="payment_agent",
-                    tool_name=tool_name,
-                    evidence_refs=[evidence_ref],
-                    attributes={"order_id": order_id},
-                )
+            evidence[tool_name] = result
+            actor = "policy_agent" if tool_name == "get_policy" else "payment_agent"
+            attributes = {"domain": result["domain"]}
+            if order_id is not None and tool_name != "get_policy":
+                attributes["order_id"] = order_id
+            self.trace.emit(
+                case_id=case_id,
+                event_type="tool_result_consumed",
+                actor=actor,
+                tool_name=tool_name,
+                evidence_refs=[result["evidence_ref"]],
+                attributes=attributes,
+            )
 
-            orders[order_id] = order_evidence
-
-        evidence_refs = list(dict.fromkeys(evidence_refs))
-        payment_references = list(dict.fromkeys(payment_references))
-        payment_payloads = [order["order_payments"]["data"] for order in orders.values()]
-        payment_timelines = [order["payment_timeline"]["data"] for order in orders.values()]
-        refund_timelines = [order["refund_timeline"]["data"] for order in orders.values()]
-        payment_statuses = _extract_strings(payment_timelines, _STATUS_KEYS)
-        refund_statuses = _extract_strings(refund_timelines, _STATUS_KEYS)
+        payment_payloads = [
+            evidence[name]["data"]
+            for name in ("get_order_payments", "get_payment_timeline")
+            if name in evidence
+        ]
+        refund_payload = (
+            evidence["get_refund_timeline"]["data"]
+            if "get_refund_timeline" in evidence
+            else []
+        )
+        refund_statuses = _extract_strings(refund_payload, _STATUS_KEYS)
         normalized_refund_statuses = {status.lower() for status in refund_statuses}
         issue_signals = {
-            "duplicate_charge": _contains_explicit_duplicate(
-                [*payment_payloads, *payment_timelines]
-            ),
+            "duplicate_charge": _contains_explicit_duplicate(payment_payloads),
             "refund_pending": bool(
                 normalized_refund_statuses
                 & {"initiated", "pending", "processing", "requested"}
@@ -237,73 +237,69 @@ class PaymentPolicyAgent:
                 & {"declined", "failed", "rejected", "reversed"}
             ),
         }
-
-        policy_versions = _extract_strings(context, _POLICY_VERSION_KEYS)
-        if len(policy_versions) > 1:
-            raise ValueError(f"case contains multiple policy versions: {policy_versions}")
-
-        policy_data: dict[str, Any] | None = None
-        policy_evidence_ref: str | None = None
-        policy_status = "missing_policy_version"
-        if policy_versions:
-            policy_version = policy_versions[0]
-            policy_evidence = await self.gateway.call(
-                "get_policy",
-                case_id=case_id,
-                policy_version=policy_version,
-            )
-            if policy_evidence["domain"] != "policy":
-                raise ValueError(
-                    "get_policy returned domain "
-                    f"{policy_evidence['domain']!r}; expected 'policy'"
-                )
-            policy_evidence_ref = policy_evidence["evidence_ref"]
-            policy_data = policy_evidence["data"]
-            evidence_refs.append(policy_evidence_ref)
-            self.trace.emit(
-                case_id=case_id,
-                event_type="tool_result_consumed",
-                actor="policy_agent",
-                tool_name="get_policy",
-                evidence_refs=[policy_evidence_ref],
-                attributes={"policy_version": policy_version},
-            )
-            policy_status = "evidence_collected"
-
-        evidence_refs = list(dict.fromkeys(evidence_refs))
-        payment_evidence_refs = list(dict.fromkeys(payment_evidence_refs))
-        refund_evidence_refs = list(dict.fromkeys(refund_evidence_refs))
-        claim_assessments = _payment_claim_assessments(
-            _extract_claims(context),
-            issue_signals,
-            payment_evidence_refs,
-            refund_evidence_refs,
+        payment_evidence_refs = [
+            evidence[name]["evidence_ref"]
+            for name in ("get_order_payments", "get_payment_timeline")
+            if name in evidence
+        ]
+        refund_evidence_refs = (
+            [evidence["get_refund_timeline"]["evidence_ref"]]
+            if "get_refund_timeline" in evidence
+            else []
+        )
+        policy_ref = (
+            evidence["get_policy"]["evidence_ref"] if "get_policy" in evidence else None
+        )
+        self.trace.emit(
+            case_id=case_id,
+            event_type="policy_decided",
+            actor="policy_agent",
+            decision_code=(
+                "policy_evidence_collected" if policy_ref else "policy_evidence_unavailable"
+            ),
+            evidence_refs=[policy_ref] if policy_ref else None,
+            attributes={"policy_available": policy_ref is not None},
         )
 
+        all_payment_data = [
+            evidence[name]["data"]
+            for name in ("get_order_payments", "get_payment_timeline")
+            if name in evidence
+        ]
+        evidence_refs = [item["evidence_ref"] for item in evidence.values()]
         return {
-            "payment_data": {
-                "orders": orders,
-                "summary": {
-                    "order_count": len(orders),
-                    "payment_record_count": sum(
-                        _record_count(payload, ("payments", "payment_rows", "records"))
-                        for payload in payment_payloads
-                    ),
-                    "payment_statuses": payment_statuses,
-                    "refund_statuses": refund_statuses,
-                    "payment_methods": _extract_strings(payment_payloads, _PAYMENT_METHOD_KEYS),
-                },
-            },
-            "payment_references": payment_references,
+            "evidence": evidence,
+            "data": {name: value["data"] for name, value in evidence.items()},
+            "errors": errors,
             "evidence_refs": evidence_refs,
-            "issue_signals": issue_signals,
-            "claim_assessments": claim_assessments,
-            "policy": {
-                "status": policy_status,
-                "evidence_ref": policy_evidence_ref,
-                "data": policy_data,
+            "payment_data": {
+                "order_id": order_id,
+                "payment_record_count": _record_count(
+                    evidence.get("get_order_payments", {}).get("data", []),
+                    ("payments", "payment_rows", "records"),
+                ),
+                "payment_statuses": _extract_strings(all_payment_data, _STATUS_KEYS),
+                "refund_statuses": refund_statuses,
+                "payment_methods": _extract_strings(
+                    all_payment_data, _PAYMENT_METHOD_KEYS
+                ),
             },
-            "financial_resolution_candidate": None,
-            "resolution_actions": [],
-            "status": "completed" if order_ids else "missing_order_id",
+            "payment_references": _extract_strings(
+                all_payment_data, _PAYMENT_REFERENCE_KEYS
+            ),
+            "issue_signals": issue_signals,
+            "claim_assessments": _payment_claim_assessments(
+                _extract_claims(context),
+                issue_signals,
+                payment_evidence_refs,
+                refund_evidence_refs,
+            ),
+            "policy": {
+                "status": "evidence_collected" if policy_ref else "missing_policy_evidence",
+                "evidence_ref": policy_ref,
+                "data": (
+                    evidence["get_policy"]["data"] if "get_policy" in evidence else None
+                ),
+            },
+            "status": "completed" if order_id else "missing_order_id",
         }

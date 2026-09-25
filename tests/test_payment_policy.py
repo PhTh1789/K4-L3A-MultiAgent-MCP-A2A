@@ -95,13 +95,16 @@ async def test_payment_agent_calls_scoped_tools_and_preserves_evidence() -> None
         "refund_pending": True,
         "refund_failed": False,
     }
-    assert [event["tool_name"] for event in trace.events] == [
+    tool_events = [
+        event for event in trace.events if event["event_type"] == "tool_result_consumed"
+    ]
+    assert [event["tool_name"] for event in tool_events] == [
         "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
     ]
-    assert all(event["event_type"] == "tool_result_consumed" for event in trace.events)
+    assert trace.events[-1]["event_type"] == "policy_decided"
     assert result["policy"]["status"] == "evidence_collected"
     assert result["claim_assessments"] == [
         {
@@ -135,8 +138,8 @@ async def test_payment_agent_does_not_treat_customer_text_as_order_id() -> None:
 
     assert result["status"] == "missing_order_id"
     assert gateway.calls == []
-    assert trace.events == []
-    assert result["policy"]["status"] == "missing_policy_version"
+    assert [event["event_type"] for event in trace.events] == ["policy_decided"]
+    assert result["policy"]["status"] == "missing_policy_evidence"
 
 
 @pytest.mark.anyio
