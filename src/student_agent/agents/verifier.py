@@ -10,7 +10,7 @@ from .analysis import build_output
 class VerifierAgent:
     """Cross-check specialist evidence and emit the contract-shaped result."""
 
-    def __init__(self, gateway: EvidenceGateway, trace: TraceWriter):
+    def __init__(self, gateway: EvidenceGateway, trace: TraceWriter) -> None:
         self.gateway = gateway
         self.trace = trace
 
@@ -28,4 +28,3 @@ class VerifierAgent:
             },
         )
         return output
-
