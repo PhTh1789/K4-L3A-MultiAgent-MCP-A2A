@@ -14,11 +14,19 @@ class CoordinatorAgent:
         self.trace = trace
 
     async def run(self, case: dict[str, Any]) -> dict[str, Any]:
+<<<<<<< HEAD
         """Accept a case and preserve only input needed downstream."""
+=======
+        """Tiếp nhận case, phân tích sơ bộ và chuẩn bị context chia task."""
+        case_id = case["case_id"]
+        
+        # Emit event báo hiệu đã nhận case và chia task
+>>>>>>> 0fd2fda423711fdf0f24264a8859d30a024c2485
         self.trace.emit(
-            case_id=case["case_id"],
+            case_id=case_id,
             event_type="task_assigned",
             actor="coordinator",
+<<<<<<< HEAD
             target="order_shipment_agent",
             attributes={"specialists": 2},
         )
@@ -50,3 +58,21 @@ class CoordinatorAgent:
             "claims": claims,
             "policy_version": policy_version,
         }
+=======
+            target="specialists",
+            attributes={
+                "customer_claims_count": len(case.get("claims", []))
+            }
+        )
+        
+        # Khởi tạo Context để các Agent phía sau điền dữ liệu vào
+        # Đây chính là "giao kèo" dữ liệu (Data Contract)
+        context = {
+            "case_info": case,
+            "fulfillment": {},  # Nhánh của Dương sẽ điền vào đây
+            "finance": {}       # Nhánh của Lương sẽ điền vào đây
+        }
+        
+        return context
+
+>>>>>>> 0fd2fda423711fdf0f24264a8859d30a024c2485
