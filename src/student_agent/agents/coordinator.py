@@ -10,10 +10,26 @@ class CoordinatorAgent:
 
     async def run(self, case: dict[str, Any]) -> dict[str, Any]:
         """Tiếp nhận case, phân tích sơ bộ và chuẩn bị context chia task."""
+        case_id = case["case_id"]
+        
+        # Emit event báo hiệu đã nhận case và chia task
         self.trace.emit(
-            case_id=case["case_id"],
+            case_id=case_id,
             event_type="task_assigned",
             actor="coordinator",
-            target="specialists"
+            target="specialists",
+            attributes={
+                "customer_claims_count": len(case.get("claims", []))
+            }
         )
-        return {"case_info": case}
+        
+        # Khởi tạo Context để các Agent phía sau điền dữ liệu vào
+        # Đây chính là "giao kèo" dữ liệu (Data Contract)
+        context = {
+            "case_info": case,
+            "fulfillment": {},  # Nhánh của Dương sẽ điền vào đây
+            "finance": {}       # Nhánh của Lương sẽ điền vào đây
+        }
+        
+        return context
+
