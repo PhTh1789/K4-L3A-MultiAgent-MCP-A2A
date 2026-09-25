@@ -4,7 +4,6 @@ from typing import Any
 
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
-from .analysis import build_output
 
 
 class VerifierAgent:
@@ -15,9 +14,6 @@ class VerifierAgent:
         self.trace = trace
 
     def run(self, case_id: str, context: dict[str, Any]) -> dict[str, Any]:
-<<<<<<< HEAD
-        output = build_output(context)
-=======
         """Kiểm tra chéo và xuất kết quả cuối cùng theo Schema (Thịnh)"""
         
         # Lấy dữ liệu từ 2 nhánh (có default là dict rỗng nếu 2 bạn kia chưa code xong)
@@ -107,21 +103,10 @@ class VerifierAgent:
         assessment["confidence"] = confidence
         
         # 5. Phát ra sự kiện hoàn thành (Lifecycle)
->>>>>>> 0fd2fda423711fdf0f24264a8859d30a024c2485
         self.trace.emit(
             case_id=case_id,
             event_type="verification_completed",
             actor="verifier",
-<<<<<<< HEAD
-            decision_code=output["assessment"]["primary_issue"],
-            evidence_refs=output["evidence_refs"][:20],
-            attributes={
-                "confidence": output["assessment"]["confidence"],
-                "case_status": output["assessment"]["case_status"],
-            },
-        )
-        return output
-=======
             attributes={
                 "calibrated_confidence": confidence,
                 "conflicts_detected": len(data_conflicts)
@@ -141,5 +126,3 @@ class VerifierAgent:
             "financial_resolution": financial_resolution,
             "resolution_actions": resolution_actions
         }
-
->>>>>>> 0fd2fda423711fdf0f24264a8859d30a024c2485
