@@ -14,26 +14,41 @@ class CoordinatorAgent:
         self.trace = trace
 
     async def run(self, case: dict[str, Any]) -> dict[str, Any]:
-        """Tiếp nhận case, phân tích sơ bộ và chuẩn bị context chia task."""
-        case_id = case["case_id"]
-        
-        # Emit event báo hiệu đã nhận case và chia task
+        """Accept a case and preserve only input needed downstream."""
+        case_id = case.get("case_id", "unknown")
         self.trace.emit(
             case_id=case_id,
             event_type="task_assigned",
             actor="coordinator",
-            target="specialists",
-            attributes={
-                "customer_claims_count": len(case.get("claims", []))
-            }
+            target="order_shipment_agent",
+            attributes={"specialists": 2},
         )
-        
-        # Khởi tạo Context để các Agent phía sau điền dữ liệu vào
-        # Đây chính là "giao kèo" dữ liệu (Data Contract)
-        context = {
+        customer_request = case.get("customer_request")
+        if not isinstance(customer_request, dict):
+            customer_request = {}
+
+        claimed_order_id = customer_request.get("claimed_order_id")
+        if not isinstance(claimed_order_id, str) or not claimed_order_id.strip():
+            claimed_order_id = case.get("claimed_order_id")
+        if not isinstance(claimed_order_id, str):
+            claimed_order_id = None
+
+        claims = case.get("claims")
+        if not isinstance(claims, list):
+            claims = customer_request.get("claims")
+        if not isinstance(claims, list):
+            claims = []
+
+        policy_version = case.get("policy_version")
+        if not isinstance(policy_version, str):
+            policy_version = customer_request.get("policy_version")
+        if not isinstance(policy_version, str):
+            policy_version = ""
+
+        return {
             "case_info": case,
-            "fulfillment": {},  # Nhánh của Dương sẽ điền vào đây
-            "finance": {}       # Nhánh của Lương sẽ điền vào đây
+            "claimed_order_id": claimed_order_id,
+            "claims": claims,
+            "policy_version": policy_version,
         }
-        
-        return context
+
