@@ -43,14 +43,19 @@ class EvidenceGateway:
         return evidence
 
 
-def _retryable_error(error: Exception) -> bool:
+def is_retryable_error(error: BaseException) -> bool:
     """Retry transport-like failures, but never retry malformed requests."""
+    if isinstance(error, BaseExceptionGroup):
+        return any(is_retryable_error(child) for child in error.exceptions)
     if isinstance(error, (ValueError, KeyError, TypeError)):
         return False
     if isinstance(error, (TimeoutError, OSError)):
         return True
-    message = str(error).lower()
+    message = f"{type(error).__name__} {error}".lower()
     markers = (
+        "connecterror",
+        "readerror",
+        "remoteprotocolerror",
         "timeout",
         "timed out",
         "temporarily unavailable",
@@ -84,7 +89,7 @@ async def call_with_retry(
             return await gateway.call(tool_name, case_id=case_id, **arguments)
         except Exception as error:
             last_error = error
-            if attempt == attempts - 1 or not _retryable_error(error):
+            if attempt == attempts - 1 or not is_retryable_error(error):
                 raise
             await asyncio.sleep(backoff_seconds * (2**attempt))
 

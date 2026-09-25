@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from student_agent.mcp_gateway import EvidenceGateway
+from student_agent.mcp_gateway import EvidenceGateway, is_retryable_error
 
 
 class FakeContracts:
@@ -62,3 +62,13 @@ async def test_gateway_raises_for_mcp_v2_error_result() -> None:
         await gateway.call(
             "get_order_payments", case_id="CASE_001", order_id="ORDER-001"
         )
+
+
+def test_retryable_error_finds_transport_error_inside_exception_group() -> None:
+    error = ExceptionGroup("MCP task group failed", [ConnectionError("connection reset")])
+
+    assert is_retryable_error(error)
+
+
+def test_retryable_error_rejects_contract_errors() -> None:
+    assert not is_retryable_error(ValueError("invalid evidence"))
