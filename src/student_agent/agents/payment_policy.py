@@ -167,15 +167,15 @@ class PaymentPolicyAgent:
         if len(policy_versions) > 1:
             raise ValueError(f"case contains multiple policy versions: {policy_versions}")
 
+        claims = context.get("claims", [])
+        claim_topics = {c.get("topic") for c in claims if isinstance(c, dict) and c.get("topic")}
+
         requests: list[tuple[str, dict[str, str], str]] = []
         if order_id is not None:
-            requests.extend(
-                (
-                    ("get_order_payments", {"order_id": order_id}, "payment"),
-                    ("get_payment_timeline", {"order_id": order_id}, "payment"),
-                    ("get_refund_timeline", {"order_id": order_id}, "refund"),
-                )
-            )
+            requests.append(("get_order_payments", {"order_id": order_id}, "payment"))
+            requests.append(("get_payment_timeline", {"order_id": order_id}, "payment"))
+            requests.append(("get_refund_timeline", {"order_id": order_id}, "refund"))
+
         if policy_versions:
             requests.append(
                 ("get_policy", {"policy_version": policy_versions[0]}, "policy")

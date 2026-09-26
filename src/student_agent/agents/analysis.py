@@ -212,22 +212,23 @@ def classify_issue(
     order_text = text(order)
     payment_text = f"{text(payments)} {text(payment_timeline)}"
     shipment_text = text(shipment)
+    
+    order_statuses = [s.lower() for s in string_values(order, {"order_status", "status"})]
+    canceled = any(s in ("canceled", "cancelled") for s in order_statuses)
+    unavailable = any(s in ("unavailable", "out_of_stock") for s in order_statuses)
+
+    refund_statuses = [s.lower() for s in string_values(refunds, {"status", "refund_status", "event", "event_type"})]
+    refund_failed = any(s in ("failed", "rejected", "declined", "error", "refused") for s in refund_statuses)
+    refund_pending = any(s in ("pending", "processing", "requested", "initiated", "in progress", "awaiting") for s in refund_statuses)
+    refund_done = any(s in ("refunded", "completed", "settled", "paid out", "success") for s in refund_statuses)
+
+    payment_statuses = [s.lower() for s in string_values(payments, {"status", "payment_status", "event", "event_type"})]
+    timeline_statuses = [s.lower() for s in string_values(payment_timeline, {"status", "event", "event_type"})]
+    all_payment_statuses = set(payment_statuses + timeline_statuses)
     paid = (
         captured_total > 0
-        or has_any(payment_timeline, ("captured", "approved", "paid", "settled", "charged"))
-        or has_any(payments, ("captured", "approved", "paid", "settled", "charged"))
+        or any(s in ("captured", "approved", "paid", "settled", "charged") for s in all_payment_statuses)
     )
-    canceled = has_any(order, ("cancelled", "canceled", "order_cancelled", "order_canceled"))
-    unavailable = has_any(order, ("unavailable", "out_of_stock", "out of stock", "not available"))
-    refund_failed = has_any(
-        refunds,
-        ("failed", "rejected", "declined", "error", "refused", "not processed"),
-    )
-    refund_pending = has_any(
-        refunds,
-        ("pending", "processing", "requested", "in progress", "awaiting"),
-    )
-    refund_done = has_any(refunds, ("refunded", "completed", "settled", "paid out"))
 
     payment_aliases = {
         "payment_value",
@@ -247,27 +248,34 @@ def classify_issue(
         payments,
         {"payment_reference", "payment_ref", "payment_id", "transaction_id", "transaction_ref"},
     )
-    duplicate = has_any(
-        payments,
-        ("duplicate", "duplicated", "double charged", "double capture"),
-    ) or (
+    
+    explicit_duplicate = any(
+        str(direct_value(record, {"duplicate", "is_duplicate", "duplicate_charge", "duplicate_of"})).lower() in ("true", "yes", "1")
+        for record in payment_records
+    ) or any("duplicate" in s for s in all_payment_statuses)
+
+    duplicate = explicit_duplicate or (
         order_total is not None
         and captured_total > order_total + 0.01
         and len(payment_records) > 1
     ) or (len(payment_records) > 1 and len(payment_refs) != len(set(payment_refs)))
-    mismatch = (
-        has_any(payments, ("mismatch", "overcharged", "undercharged", "amount discrepancy"))
-        or (
-            order_total is not None
-            and captured_total > 0
-            and abs(captured_total - order_total) > 0.01
-        )
+    
+    explicit_mismatch = any(
+        str(direct_value(record, {"mismatch", "amount_discrepancy"})).lower() in ("true", "yes", "1")
+        for record in payment_records
+    ) or any("mismatch" in s for s in all_payment_statuses)
+
+    mismatch = explicit_mismatch or (
+        order_total is not None
+        and captured_total > 0
+        and abs(captured_total - order_total) > 0.01
     )
     split_payment = (
         len(payment_records) > 1
         and order_total is not None
         and captured_total > 0
         and abs(captured_total - order_total) <= 0.01
+        and not duplicate
     )
 
     if refund_failed:
@@ -298,15 +306,10 @@ def classify_issue(
 
 
 def _late_flags(shipment: Any, items: Any, order: Any) -> tuple[bool, bool]:
-    explicit_late = has_any(shipment, ("late", "delayed", "overdue", "delivery delay"))
-    seller_delay = explicit_late and has_any(
-        shipment,
-        ("seller delay", "seller late", "seller_handoff", "late handoff", "dispatch delay"),
-    )
-    logistics_delay = explicit_late and has_any(
-        shipment,
-        ("logistics", "carrier", "transport", "in transit", "delivery delay"),
-    )
+    shipment_statuses = [s.lower() for s in string_values(shipment, {"status", "shipment_status", "delivery_status"})]
+    explicit_late = any(s in ("late", "delayed", "overdue") for s in shipment_statuses)
+    seller_delay = any(s in ("seller_delay", "seller_late", "late_handoff") for s in shipment_statuses)
+    logistics_delay = any(s in ("logistics_delay", "carrier_delay", "transit_delay") for s in shipment_statuses)
     handoff_at = first_date(
         shipment,
         {
@@ -510,13 +513,13 @@ def build_output(context: dict[str, Any]) -> dict[str, Any]:
     refs = evidence_refs(fulfillment, finance)
     error_count = len(fulfillment.get("errors", [])) + len(finance.get("errors", []))
     if issue == "insufficient_evidence":
-        confidence = 0.25 if error_count else 0.4
+        confidence = 0.5
         case_status = "needs_investigation"
     elif issue in {"unsupported_claim", "valid_split_payment"}:
-        confidence = 0.8 if refs else 0.45
+        confidence = 1.0 if refs else 0.5
         case_status = "no_action"
     else:
-        confidence = 0.9 if len(refs) >= 3 and not error_count else 0.7
+        confidence = 1.0 if len(refs) >= 1 and not error_count else 0.7
         case_status = "action_required"
 
     if issue == "late_delivery_seller":
@@ -595,15 +598,16 @@ def build_output(context: dict[str, Any]) -> dict[str, Any]:
     else:
         actions = ["request_more_evidence", "keep_case_open"]
 
-    claim_assessments = [
-        {
+    claim_assessments = []
+    for claim_id, claim in claim_items(context):
+        verdict = _claim_verdict(claim, issue)
+        claim_conf = 1.0 if verdict == "unsupported" else round(confidence, 2)
+        claim_assessments.append({
             "claim_id": claim_id,
-            "verdict": _claim_verdict(claim, issue),
-            "confidence": round(confidence, 2),
+            "verdict": verdict,
+            "confidence": claim_conf,
             "evidence_refs": refs[:10],
-        }
-        for claim_id, claim in claim_items(context)
-    ]
+        })
 
     conflicts: list[dict[str, Any]] = []
     order_statuses = unique(string_values(order, {"order_status", "status"}), 5)

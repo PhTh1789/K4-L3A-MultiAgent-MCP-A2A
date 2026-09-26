@@ -19,12 +19,15 @@ class OrderShipmentAgent:
         if not isinstance(order_id, str) or not order_id:
             return {"evidence": {}, "data": {}, "errors": ["missing claimed order id"]}
 
-        tool_names = (
+        claims = context.get("claims", [])
+        claim_topics = {c.get("topic") for c in claims if isinstance(c, dict) and c.get("topic")}
+
+        tool_names = [
             "get_order",
             "get_order_items",
             "get_shipment_summary",
-            "get_sellers",
-        )
+            "get_sellers"
+        ]
         evidence: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
         for tool_name in tool_names:
